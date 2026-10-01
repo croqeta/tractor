@@ -4,16 +4,18 @@ import os
 import json as jsonlib
 import re
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 
-# ---------- STREAMLINK: LISTAR CALIDADES ----------
-def list_qualities(video_url):
-    """Devuelve la lista de nombres de calidad disponibles (ej: ['360p','480p','720p'])"""
+# ---------- UNA SOLA LLAMADA A STREAMLINK ----------
+def get_all_qualities(video_url):
+    """
+    Llama a streamlink UNA VEZ y devuelve todas las calidades con sus URLs.
+    Es mucho más rápido y ligero que lanzar un proceso por calidad.
+    """
     try:
         cmd = [
             'streamlink', '--json', '--loglevel', 'error',
@@ -24,68 +26,25 @@ def list_qualities(video_url):
             '--stream-timeout', '15',
             video_url
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
         if r.returncode != 0:
-            print(f"list_qualities stderr: {r.stderr}")
-            return []
+            print(f"streamlink stderr: {r.stderr}")
+            return None
         data = jsonlib.loads(r.stdout)
-        streams = data.get('streams', {})
-        return list(streams.keys())
-    except Exception as e:
-        print(f"list_qualities error: {e}")
-        return []
-
-
-# ---------- STREAMLINK: RESOLVER UNA CALIDAD ----------
-def resolve_one(video_url, quality):
-    """Devuelve dict con name, label, height, width, url, is_audio."""
-    try:
-        cmd = [
-            'streamlink', '--stream-url', '--loglevel', 'error',
-            '--http-header', 'Referer=https://ok.ru/',
-            '--http-header', f'User-Agent={UA}',
-            '--retry-streams', '1',
-            '--retry-max', '1',
-            '--stream-timeout', '15',
-            video_url, quality
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-        if r.returncode == 0 and r.stdout.strip():
-            url = r.stdout.strip()
-
-            h = None
-            m = re.match(r'(\d+)p', quality)
-            if m:
-                h = int(m.group(1))
-                label = f'{h}p' + (' HD' if h >= 720 else '')
-            else:
-                label = quality
-
-            is_audio = quality.lower() == 'audio'
-
-            return {
-                'name': quality,
-                'label': label,
-                'height': h,
-                'width': int(h * 16 / 9) if h else None,
-                'url': url,
-                'is_audio': is_audio
-            }
-        print(f"resolve_one({quality}) stderr: {r.stderr}")
-        return None
+        return data.get('streams', {})
     except subprocess.TimeoutExpired:
-        print(f"resolve_one({quality}) timeout")
+        print("streamlink timeout")
         return None
     except Exception as e:
-        print(f"resolve_one({quality}) error: {e}")
+        print(f"get_all_qualities error: {e}")
         return None
 
 
-def quality_sort_key(q):
-    if q == 'best':  return 99999
-    if q == 'worst': return -1
-    if q == 'audio': return -2
-    m = re.match(r'(\d+)p', q)
+def quality_sort_key(name):
+    if name == 'best':  return 99999
+    if name == 'worst': return -1
+    if name == 'audio': return -2
+    m = re.match(r'(\d+)p', name)
     if m: return int(m.group(1))
     return 0
 
@@ -97,36 +56,54 @@ def resolve():
     if not url:
         return jsonify({'error': 'Falta ?url='}), 400
 
-    # 1) Listar calidades
-    qualities = list_qualities(url)
-    if not qualities:
-        return jsonify({'error': 'No se pudieron listar las calidades del video'}), 500
+    streams = get_all_qualities(url)
+    if not streams:
+        return jsonify({'error': 'No se pudieron obtener las calidades del video'}), 500
 
-    # 2) Ordenar por resolución, quedarnos con las 4 mejores (sin audio)
-    video_q = [q for q in qualities if q.lower() != 'audio']
-    video_q.sort(key=quality_sort_key, reverse=True)
-    top_qualities = video_q[:4]
-
-    if not top_qualities:
-        return jsonify({'error': 'No hay calidades de video disponibles'}), 500
-
-    # 3) Resolver 2 en paralelo (Render free tiene poca CPU)
     results = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {pool.submit(resolve_one, url, q): q for q in top_qualities}
-        for f in as_completed(futures):
+    for name, info in streams.items():
+        stream_url = info.get('url')
+        if not stream_url:
+            continue
+
+        # Etiqueta legible
+        h = None
+        m = re.match(r'(\d+)p', name)
+        if m:
+            h = int(m.group(1))
+            label = f'{h}p' + (' HD' if h >= 720 else '')
+        else:
+            label = name
+
+        # Resolución desde streamlink si la trae
+        res = info.get('resolution', '')
+        if res and 'x' in res:
             try:
-                r = f.result()
-                if r: results.append(r)
-            except Exception as e:
-                print(f"future error: {e}")
+                w, hh = res.split('x')
+                h = int(hh)
+            except Exception:
+                pass
+
+        is_audio = (name.lower() == 'audio' or info.get('type') == 'audio')
+
+        results.append({
+            'name': name,
+            'label': label,
+            'height': h,
+            'width': int(h * 16 / 9) if h else None,
+            'url': stream_url,
+            'is_audio': is_audio
+        })
 
     if not results:
         return jsonify({'error': 'No se pudo resolver ninguna calidad'}), 500
 
-    # 4) Ordenar de mayor a menor
+    # Ordenar de mayor a menor, audio al final
     results.sort(key=lambda x: quality_sort_key(x['name']), reverse=True)
-    best = results[0]
+    results = [q for q in results if not q['is_audio']] + [q for q in results if q['is_audio']]
+
+    # Mejor = primera no-audio
+    best = next((q for q in results if not q['is_audio']), results[0])
 
     return jsonify({
         'best': best,
@@ -144,7 +121,6 @@ def proxy():
     if not target:
         return 'Falta ?url=', 400
 
-    # Reenviar el Range EXACTO del cliente (crítico para que el video funcione)
     client_range = request.headers.get('Range')
 
     headers = {
@@ -165,7 +141,6 @@ def proxy():
             allow_redirects=True
         )
 
-        # Construir headers de respuesta
         resp_headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -174,12 +149,10 @@ def proxy():
             'Accept-Ranges': 'bytes',
         }
 
-        # Copiar headers críticos del upstream
         for h in ['Content-Type', 'Content-Length', 'Content-Range', 'Last-Modified', 'ETag']:
             if h in r.headers:
                 resp_headers[h] = r.headers[h]
 
-        # Forzar Content-Type de video si viene raro
         ct = resp_headers.get('Content-Type', '')
         if not ct.startswith('video/') and not ct.startswith('application/octet'):
             resp_headers['Content-Type'] = 'video/mp4'
