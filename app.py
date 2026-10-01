@@ -39,9 +39,12 @@ def resolve_one(video_url, quality):
             'streamlink', '--stream-url', '--loglevel', 'error',
             '--http-header', 'Referer=https://ok.ru/',
             '--http-header', f'User-Agent={UA}',
+            '--retry-streams', '1',
+            '--retry-max', '1',
+            '--stream-timeout', '15',
             video_url, quality
         ]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if r.returncode == 0 and r.stdout.strip():
             url = r.stdout.strip()
 
@@ -90,10 +93,15 @@ def resolve():
     if not qualities:
         return jsonify({'error': 'No se pudieron listar las calidades del video'}), 500
 
-    # 2) Resolver todas en paralelo (máx 6 a la vez)
+    # 2) Ordenar por resolución y quedarnos con las 4 mejores (ignorando audio)
+    video_q = [q for q in qualities if q.lower() != 'audio']
+    video_q.sort(key=quality_sort_key, reverse=True)
+    top_qualities = video_q[:4]
+
+    # 3) Resolver SOLO 2 en paralelo (menos carga en Render free)
     results = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(resolve_one, url, q): q for q in qualities}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {pool.submit(resolve_one, url, q): q for q in top_qualities}
         for f in as_completed(futures):
             try:
                 r = f.result()
@@ -104,11 +112,11 @@ def resolve():
     if not results:
         return jsonify({'error': 'No se pudo resolver ninguna calidad'}), 500
 
-    # 3) Ordenar de mayor a menor
+    # 4) Ordenar de mayor a menor
     results.sort(key=lambda x: quality_sort_key(x['name']), reverse=True)
 
-    # 4) Elegir la mejor: primera no-audio
-    best = next((q for q in results if not q['is_audio']), results[0])
+    # 5) La mejor = la primera
+    best = results[0]
 
     return jsonify({
         'best': best,
