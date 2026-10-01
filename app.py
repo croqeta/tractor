@@ -4,6 +4,7 @@ import os
 import json as jsonlib
 import re
 import requests
+from urllib.parse import urljoin, quote
 
 app = Flask(__name__)
 
@@ -14,7 +15,7 @@ UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 def get_all_qualities(video_url):
     """
     Llama a streamlink UNA VEZ y devuelve todas las calidades con sus URLs.
-    Es mucho más rápido y ligero que lanzar un proceso por calidad.
+    Mucho más ligero que lanzar un proceso por calidad.
     """
     try:
         cmd = [
@@ -66,7 +67,6 @@ def resolve():
         if not stream_url:
             continue
 
-        # Etiqueta legible
         h = None
         m = re.match(r'(\d+)p', name)
         if m:
@@ -75,7 +75,6 @@ def resolve():
         else:
             label = name
 
-        # Resolución desde streamlink si la trae
         res = info.get('resolution', '')
         if res and 'x' in res:
             try:
@@ -98,12 +97,13 @@ def resolve():
     if not results:
         return jsonify({'error': 'No se pudo resolver ninguna calidad'}), 500
 
-    # Ordenar de mayor a menor, audio al final
-    results.sort(key=lambda x: quality_sort_key(x['name']), reverse=True)
-    results = [q for q in results if not q['is_audio']] + [q for q in results if q['is_audio']]
+    # Ordenar: video de mayor a menor, audio al final
+    video_results = [q for q in results if not q['is_audio']]
+    audio_results = [q for q in results if q['is_audio']]
+    video_results.sort(key=lambda x: quality_sort_key(x['name']), reverse=True)
+    results = video_results + audio_results
 
-    # Mejor = primera no-audio
-    best = next((q for q in results if not q['is_audio']), results[0])
+    best = results[0]
 
     return jsonify({
         'best': best,
@@ -114,7 +114,7 @@ def resolve():
     })
 
 
-# ---------- ENDPOINT: PROXY ----------
+# ---------- ENDPOINT: PROXY (MP4 + HLS) ----------
 @app.route('/proxy')
 def proxy():
     target = request.args.get('url')
@@ -141,6 +141,58 @@ def proxy():
             allow_redirects=True
         )
 
+        content_type = r.headers.get('Content-Type', '').lower()
+        is_m3u8 = (
+            'mpegurl' in content_type
+            or target.endswith('.m3u8')
+            or '/m3u8' in target
+        )
+
+        # ---------- CASO 1: ES UN MANIFIESTO HLS ----------
+        if is_m3u8:
+            content = r.text
+
+            base_proxy = request.host_url.rstrip('/')
+            new_lines = []
+
+            for line in content.split('\n'):
+                stripped = line.strip()
+                if not stripped:
+                    new_lines.append(line)
+                    continue
+
+                if stripped.startswith('#'):
+                    # Metadata con URI="..." dentro (ej: claves de cifrado, subtítulos)
+                    if 'URI="' in stripped:
+                        def replace_uri(m):
+                            uri = m.group(1)
+                            absolute = uri if uri.startswith('http') else urljoin(target, uri)
+                            proxied = f"{base_proxy}/proxy?url={quote(absolute, safe='')}"
+                            return f'URI="{proxied}"'
+                        stripped = re.sub(r'URI="([^"]+)"', replace_uri, stripped)
+                    new_lines.append(stripped)
+                else:
+                    # URL de segmento o sub-playlist
+                    absolute = stripped if stripped.startswith('http') else urljoin(target, stripped)
+                    proxied = f"{base_proxy}/proxy?url={quote(absolute, safe='')}"
+                    new_lines.append(proxied)
+
+            new_content = '\n'.join(new_lines)
+
+            return Response(
+                new_content,
+                status=200,
+                headers={
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Range, Content-Type, Accept, Origin, Referer',
+                    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Accept-Ranges',
+                    'Cache-Control': 'no-store',
+                }
+            )
+
+        # ---------- CASO 2: SEGMENTO .ts O VIDEO MP4 ----------
         resp_headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -153,8 +205,11 @@ def proxy():
             if h in r.headers:
                 resp_headers[h] = r.headers[h]
 
-        ct = resp_headers.get('Content-Type', '')
-        if not ct.startswith('video/') and not ct.startswith('application/octet'):
+        # Content-Type correcto para segmentos .ts
+        ct = resp_headers.get('Content-Type', '').lower()
+        if target.endswith('.ts') or 'mp2t' in ct:
+            resp_headers['Content-Type'] = 'video/mp2t'
+        elif not ct.startswith('video/') and not ct.startswith('application/octet'):
             resp_headers['Content-Type'] = 'video/mp4'
         elif ct.startswith('application/octet'):
             resp_headers['Content-Type'] = 'video/mp4'
