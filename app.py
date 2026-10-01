@@ -10,21 +10,125 @@ app = Flask(__name__)
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
-
-# ---------- UNA SOLA LLAMADA A STREAMLINK ----------
-def get_all_qualities(video_url):
+# ---------- EXTRAER TODAS LAS CALIDADES DESDE data-options ----------
+def get_all_qualities_okru(video_url):
     """
-    Llama a streamlink UNA VEZ y devuelve todas las calidades con sus URLs.
-    Mucho más ligero que lanzar un proceso por calidad.
+    Extrae todas las calidades disponibles parseando el JSON 'data-options'
+    del iframe de videoembed de OK.ru.
+    """
+    try:
+        # Extraer el ID del video
+        m = re.search(r'/video/(\d+)', video_url)
+        if not m:
+            print("No se pudo extraer el ID del video")
+            return None
+        video_id = m.group(1)
+
+        # Petición al iframe de videoembed
+        embed_url = f"https://ok.ru/videoembed/{video_id}"
+        headers = {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+            'Referer': 'https://ok.ru/'
+        }
+        r = requests.get(embed_url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            print(f"HTTP {r.status_code} al pedir videoembed")
+            return None
+
+        html = r.text
+
+        # Buscar el atributo data-options
+        match = re.search(r'data-options\s*=\s*"((?:[^"\\]|\\.)*)"', html)
+        if not match:
+            match = re.search(r"data-options\s*=\s*'([^']*)'", html)
+        if not match:
+            print("No se encontró data-options en el HTML")
+            return None
+
+        # Decodificar entidades HTML
+        raw = match.group(1)
+        raw = (raw.replace('&quot;', '"')
+                    .replace('&#34;', '"')
+                    .replace('&apos;', "'")
+                    .replace('&#39;', "'")
+                    .replace('&amp;', '&')
+                    .replace('&lt;', '<')
+                    .replace('&gt;', '>')
+                    .replace('&#x2F;', '/'))
+
+        try:
+            data = jsonlib.loads(raw)
+        except Exception as e:
+            print(f"Error parseando JSON: {e}")
+            return None
+
+        # Navegar hasta la lista de videos
+        videos = None
+        flashvars = data.get('flashvars') or data
+        metadata = flashvars.get('metadata')
+        if isinstance(metadata, str):
+            try:
+                metadata = jsonlib.loads(metadata)
+            except Exception:
+                metadata = None
+        if metadata and isinstance(metadata.get('videos'), list):
+            videos = metadata['videos']
+        if not videos and isinstance(data.get('videos'), list):
+            videos = data['videos']
+
+        if not videos:
+            print("No se encontró la lista de videos en el JSON")
+            return None
+
+        # Mapeo de nombres internos a resolución visible
+        NAME_TO_RES = {
+            'mobile':  {'label': '144p', 'height': 144},
+            'lowest':  {'label': '240p', 'height': 240},
+            'low':     {'label': '360p', 'height': 360},
+            'sd':      {'label': '480p', 'height': 480},
+            'hd':      {'label': '720p HD', 'height': 720},
+            'full':    {'label': '1080p Full HD', 'height': 1080},
+            'quad':    {'label': '1440p Quad HD', 'height': 1440},
+            'ultra':   {'label': '2160p 4K', 'height': 2160},
+        }
+
+        results = []
+        for v in videos:
+            if not v or not v.get('url'):
+                continue
+            name = (v.get('name') or '').lower()
+            info = NAME_TO_RES.get(name)
+            h = v.get('height') or (info['height'] if info else None)
+            w = v.get('width') or (int(h * 16 / 9) if h else None)
+            label = info['label'] if info else (f'{h}p' if h else name)
+
+            results.append({
+                'name': name,
+                'label': label,
+                'height': h,
+                'width': w,
+                'url': v['url'],
+                'is_audio': False
+            })
+
+        return results
+
+    except Exception as e:
+        print(f"Error en get_all_qualities_okru: {e}")
+        return None
+
+# ---------- EXTRAER CALIDADES PARA VK (con streamlink) ----------
+def get_all_qualities_vk(video_url):
+    """
+    Para VK usamos streamlink, que sí lista todas las calidades de VK.
     """
     try:
         cmd = [
             'streamlink', '--json', '--loglevel', 'error',
-            '--http-header', 'Referer=https://ok.ru/',
+            '--http-header', 'Referer=https://vk.com/',
             '--http-header', f'User-Agent={UA}',
-            '--retry-streams', '1',
-            '--retry-max', '1',
-            '--stream-timeout', '15',
             video_url
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
@@ -32,23 +136,32 @@ def get_all_qualities(video_url):
             print(f"streamlink stderr: {r.stderr}")
             return None
         data = jsonlib.loads(r.stdout)
-        return data.get('streams', {})
-    except subprocess.TimeoutExpired:
-        print("streamlink timeout")
-        return None
+        streams = data.get('streams', {})
+        if not streams:
+            return None
+
+        results = []
+        for name, info in streams.items():
+            url = info.get('url')
+            if not url:
+                continue
+            h = None
+            m = re.match(r'(\d+)p', name)
+            if m:
+                h = int(m.group(1))
+            label = f'{h}p' + (' HD' if h and h >= 720 else '') if h else name
+            results.append({
+                'name': name,
+                'label': label,
+                'height': h,
+                'width': int(h * 16 / 9) if h else None,
+                'url': url,
+                'is_audio': name.lower() == 'audio'
+            })
+        return results
     except Exception as e:
-        print(f"get_all_qualities error: {e}")
+        print(f"Error en get_all_qualities_vk: {e}")
         return None
-
-
-def quality_sort_key(name):
-    if name == 'best':  return 99999
-    if name == 'worst': return -1
-    if name == 'audio': return -2
-    m = re.match(r'(\d+)p', name)
-    if m: return int(m.group(1))
-    return 0
-
 
 # ---------- ENDPOINT: LISTAR TODAS LAS CALIDADES ----------
 @app.route('/resolve')
@@ -57,51 +170,27 @@ def resolve():
     if not url:
         return jsonify({'error': 'Falta ?url='}), 400
 
-    streams = get_all_qualities(url)
-    if not streams:
-        return jsonify({'error': 'No se pudieron obtener las calidades del video'}), 500
+    is_vk = bool(re.search(r'vk\.com|vkvideo\.ru|vk\.ru', url, re.I))
+    is_ok = bool(re.search(r'ok\.ru', url, re.I))
 
-    results = []
-    for name, info in streams.items():
-        stream_url = info.get('url')
-        if not stream_url:
-            continue
-
-        h = None
-        m = re.match(r'(\d+)p', name)
-        if m:
-            h = int(m.group(1))
-            label = f'{h}p' + (' HD' if h >= 720 else '')
-        else:
-            label = name
-
-        res = info.get('resolution', '')
-        if res and 'x' in res:
-            try:
-                w, hh = res.split('x')
-                h = int(hh)
-            except Exception:
-                pass
-
-        is_audio = (name.lower() == 'audio' or info.get('type') == 'audio')
-
-        results.append({
-            'name': name,
-            'label': label,
-            'height': h,
-            'width': int(h * 16 / 9) if h else None,
-            'url': stream_url,
-            'is_audio': is_audio
-        })
+    if is_ok:
+        results = get_all_qualities_okru(url)
+    elif is_vk:
+        results = get_all_qualities_vk(url)
+    else:
+        return jsonify({'error': 'URL no soportada'}), 400
 
     if not results:
-        return jsonify({'error': 'No se pudo resolver ninguna calidad'}), 500
+        return jsonify({'error': 'No se pudieron obtener las calidades del video'}), 500
 
-    # Ordenar: video de mayor a menor, audio al final
+    # Ordenar de mayor a menor, audio al final
     video_results = [q for q in results if not q['is_audio']]
     audio_results = [q for q in results if q['is_audio']]
-    video_results.sort(key=lambda x: quality_sort_key(x['name']), reverse=True)
+    video_results.sort(key=lambda x: (x.get('height') or 0), reverse=True)
     results = video_results + audio_results
+
+    if not results:
+        return jsonify({'error': 'No hay calidades de video disponibles'}), 500
 
     best = results[0]
 
@@ -112,7 +201,6 @@ def resolve():
         'count': len(results),
         'status': 'ok'
     })
-
 
 # ---------- ENDPOINT: PROXY (MP4 + HLS) ----------
 @app.route('/proxy')
@@ -148,10 +236,9 @@ def proxy():
             or '/m3u8' in target
         )
 
-        # ---------- CASO 1: ES UN MANIFIESTO HLS ----------
+        # ---------- CASO 1: MANIFIESTO HLS ----------
         if is_m3u8:
             content = r.text
-
             base_proxy = request.host_url.rstrip('/')
             new_lines = []
 
@@ -162,7 +249,6 @@ def proxy():
                     continue
 
                 if stripped.startswith('#'):
-                    # Metadata con URI="..." dentro (ej: claves de cifrado, subtítulos)
                     if 'URI="' in stripped:
                         def replace_uri(m):
                             uri = m.group(1)
@@ -172,7 +258,6 @@ def proxy():
                         stripped = re.sub(r'URI="([^"]+)"', replace_uri, stripped)
                     new_lines.append(stripped)
                 else:
-                    # URL de segmento o sub-playlist
                     absolute = stripped if stripped.startswith('http') else urljoin(target, stripped)
                     proxied = f"{base_proxy}/proxy?url={quote(absolute, safe='')}"
                     new_lines.append(proxied)
@@ -192,7 +277,7 @@ def proxy():
                 }
             )
 
-        # ---------- CASO 2: SEGMENTO .ts O VIDEO MP4 ----------
+        # ---------- CASO 2: SEGMENTO O VIDEO MP4 ----------
         resp_headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -205,7 +290,6 @@ def proxy():
             if h in r.headers:
                 resp_headers[h] = r.headers[h]
 
-        # Content-Type correcto para segmentos .ts
         ct = resp_headers.get('Content-Type', '').lower()
         if target.endswith('.ts') or 'mp2t' in ct:
             resp_headers['Content-Type'] = 'video/mp2t'
@@ -225,12 +309,9 @@ def proxy():
     except Exception as e:
         return f'Error en proxy: {e}', 500
 
-
-# ---------- ENDPOINT: HEALTH ----------
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'}), 200
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
