@@ -2,3 +2,4 @@ Flask
 gunicorn
 streamlink
 requests
+yt-dlp
