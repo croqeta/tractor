@@ -119,11 +119,83 @@ def get_all_qualities_okru(video_url):
         print(f"Error en get_all_qualities_okru: {e}")
         return None
 
-# ---------- EXTRAER CALIDADES PARA VK (con streamlink) ----------
-def get_all_qualities_vk(video_url):
-    """
-    Para VK usamos streamlink, que sí lista todas las calidades de VK.
-    """
+# ---------- EXTRAER CALIDADES PARA VK ----------
+# Nuevo plan: yt-dlp primero (mantiene VK al día), streamlink como fallback.
+def _vk_ytdlp(video_url):
+    """Intento principal: yt-dlp (soporte activo y actualizado para VK)."""
+    try:
+        cmd = [
+            'yt-dlp',
+            '--no-warnings',
+            '--no-playlist',
+            '--no-check-certificate',
+            '--geo-bypass',
+            '--user-agent', UA,
+            '--referer', 'https://vk.com/',
+            '--add-header', 'Accept-Language:es-ES,es;q=0.9,en;q=0.8',
+            '-J',  # volcar toda la info del video como JSON
+            video_url
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=55)
+        if r.returncode != 0:
+            print(f"[VK/yt-dlp] rc={r.returncode}")
+            print(f"[VK/yt-dlp] stderr:\n{r.stderr[:1500]}")
+            return None
+
+        data = jsonlib.loads(r.stdout)
+        formats = data.get('formats') or []
+        if not formats:
+            print("[VK/yt-dlp] Sin formats en la respuesta")
+            return None
+
+        results = []
+        seen = set()
+        for f in formats:
+            u = f.get('url')
+            if not u:
+                continue
+            vcodec = (f.get('vcodec') or '').lower()
+            acodec = (f.get('acodec') or '').lower()
+            is_audio = (vcodec == 'none' and acodec != 'none')
+            h = f.get('height') or 0
+            w = f.get('width')
+            fid = f.get('format_id') or ''
+            fnote = f.get('format_note') or ''
+
+            if is_audio:
+                label = 'Audio'
+            elif h:
+                label = f'{h}p' + (' HD' if h >= 720 else '') + (' 4K' if h >= 2000 else '')
+            else:
+                label = fnote or fid or 'Video'
+
+            # Evitar duplicados de misma altura (audio se mantiene)
+            key = ('a' if is_audio else 'v', h)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            results.append({
+                'name': fid or fnote or label,
+                'label': label,
+                'height': h,
+                'width': w or (int(h * 16 / 9) if h else None),
+                'url': u,
+                'is_audio': is_audio
+            })
+
+        if not results:
+            print("[VK/yt-dlp] Formats vacíos tras filtrado")
+            return None
+        return results
+
+    except Exception as e:
+        print(f"[VK/yt-dlp] excepción: {type(e).__name__}: {e}")
+        return None
+
+
+def _vk_streamlink(video_url):
+    """Fallback: streamlink (el que ya tenías)."""
     try:
         cmd = [
             'streamlink', '--json', '--loglevel', 'error',
@@ -133,7 +205,7 @@ def get_all_qualities_vk(video_url):
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
         if r.returncode != 0:
-            print(f"streamlink stderr: {r.stderr}")
+            print(f"[VK/streamlink] stderr: {r.stderr[:800]}")
             return None
         data = jsonlib.loads(r.stdout)
         streams = data.get('streams', {})
@@ -142,8 +214,8 @@ def get_all_qualities_vk(video_url):
 
         results = []
         for name, info in streams.items():
-            url = info.get('url')
-            if not url:
+            u = info.get('url')
+            if not u:
                 continue
             h = None
             m = re.match(r'(\d+)p', name)
@@ -155,13 +227,29 @@ def get_all_qualities_vk(video_url):
                 'label': label,
                 'height': h,
                 'width': int(h * 16 / 9) if h else None,
-                'url': url,
+                'url': u,
                 'is_audio': name.lower() == 'audio'
             })
-        return results
+        return results or None
     except Exception as e:
-        print(f"Error en get_all_qualities_vk: {e}")
+        print(f"[VK/streamlink] excepción: {type(e).__name__}: {e}")
         return None
+
+
+def get_all_qualities_vk(video_url):
+    """yt-dlp primero; si falla, streamlink como respaldo."""
+    print(f"[VK] intentando yt-dlp con {video_url}")
+    r = _vk_ytdlp(video_url)
+    if r:
+        print(f"[VK] yt-dlp OK, {len(r)} formatos")
+        return r
+    print("[VK] yt-dlp falló, probando streamlink")
+    r = _vk_streamlink(video_url)
+    if r:
+        print(f"[VK] streamlink OK, {len(r)} formatos")
+    else:
+        print("[VK] ambos extractores fallaron")
+    return r
 
 # ---------- ENDPOINT: LISTAR TODAS LAS CALIDADES ----------
 @app.route('/resolve')
