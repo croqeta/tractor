@@ -1,0 +1,13 @@
+---
+title: Tractor API
+emoji: 🎬
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+# Tractor API
+
+Extractor de URLs para OK.ru y VK. Basado en Flask + yt-dlp + streamlink.
