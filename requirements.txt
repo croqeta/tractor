@@ -2,4 +2,4 @@ Flask
 gunicorn
 streamlink
 requests
-yt-dlp
+yt-dlp>=2026.1.1
