@@ -401,6 +401,57 @@ def proxy():
 def health():
     return jsonify({'status': 'ok'}), 200
 
+# ---------- PRUEBA TEMPORAL: anime-dl-core para VK ----------
+@app.route('/resolve-vk-alt')
+def resolve_vk_alt():
+    url = request.args.get('url', '').strip()
+    if not url:
+        return jsonify({'ok': False, 'error': 'Falta ?url='}), 400
+
+    try:
+        import anime_dl_core as ap
+    except Exception as e:
+        return jsonify({
+            'ok': False,
+            'error': 'No se pudo importar anime-dl-core: ' + str(e)
+        }), 500
+
+    try:
+        kwargs = {'timeout': 30}
+        proxy = os.environ.get('VK_PROXY')
+        if proxy:
+            kwargs['proxy'] = proxy
+
+        result = ap.extract(url, **kwargs)
+        master = result.master()
+        best_hls = result.best(kind='hls')
+
+        def stream_info(s):
+            return {
+                'kind': getattr(s.kind, 'value', str(s.kind)),
+                'quality': s.quality,
+                'label': s.label,
+                'url': s.url,
+                'headers': s.headers,
+            }
+
+        return jsonify({
+            'ok': True,
+            'title': result.title,
+            'duration': result.duration,
+            'qualities': result.qualities,
+            'master': stream_info(master) if master else None,
+            'best_hls': stream_info(best_hls) if best_hls else None,
+            'streams': [stream_info(s) for s in result.streams],
+        })
+
+    except Exception as e:
+        return jsonify({
+            'ok': False,
+            'type': type(e).__name__,
+            'error': str(e),
+        }), 502
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
