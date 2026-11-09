@@ -3,4 +3,4 @@ gunicorn
 streamlink
 requests
 yt-dlp>=2026.1.1
-anime-dl-core>=1.0.0
+anime-dl-core==0.5.1
