@@ -466,25 +466,29 @@ def subtitles():
 
                 ext = (e.get('ext') or 'vtt').lower()
 
-                # Preferir SRT si ya existe ese idioma
-                existing = next((x for x in out if x['lang'] == lang), None)
+                existing = next(
+                    (x for x in out if x['lang'] == lang),
+                    None
+                )
+
                 if existing:
-                    if ext == 'srt' and not existing['url'].lower().endswith('.srt'):
-                        existing['url'] = u
+                    if ext == 'srt' and not existing['id'].endswith('-srt'):
                         existing['id'] = f'{lang}-srt'
+                        existing['url'] = u
                     continue
 
-               proxied = (
-    f"{request.host_url.rstrip('/')}/subtitle"
-    f"?url={quote(u, safe='')}"
-)
+                out.append({
+                    'id': f'{lang}-{ext}',
+                    'url': u,
+                    'lang': lang,
+                    'name': names.get(lang, lang)
+                })
 
-out.append({
-    'id': f'{lang}-{ext}',
-    'url': proxied,
-    'lang': lang,
-    'name': names.get(lang, lang)
-})
+        for item in out:
+            item['url'] = (
+                f"{request.host_url.rstrip('/')}/subtitle"
+                f"?url={quote(item['url'], safe='')}"
+            )
 
         return jsonify({'subtitles': out})
 
