@@ -474,12 +474,17 @@ def subtitles():
                         existing['id'] = f'{lang}-srt'
                     continue
 
-                out.append({
-                    'id': f'{lang}-{ext}',
-                    'url': u,
-                    'lang': lang,
-                    'name': names.get(lang, lang)
-                })
+               proxied = (
+    f"{request.host_url.rstrip('/')}/subtitle"
+    f"?url={quote(u, safe='')}"
+)
+
+out.append({
+    'id': f'{lang}-{ext}',
+    'url': proxied,
+    'lang': lang,
+    'name': names.get(lang, lang)
+})
 
         return jsonify({'subtitles': out})
 
