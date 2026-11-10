@@ -6,6 +6,28 @@ import re
 import requests
 from urllib.parse import urljoin, quote
 
+def patch_ytdlp_vk_subs():
+    try:
+        import pathlib
+        import yt_dlp
+
+        p = pathlib.Path(yt_dlp.__file__).resolve().parent / "extractor" / "vk.py"
+        src = p.read_text(encoding="utf-8")
+
+        old = "'ext': sub.get('title', '.srt').split('.')[-1],"
+        new = "'ext': (sub.get('title') or '.srt').split('.')[-1],"
+
+        if old in src:
+            p.write_text(src.replace(old, new), encoding="utf-8")
+            print("[patch] yt-dlp VK subtitles fixed")
+        else:
+            print("[patch] pattern not found; maybe already fixed")
+    except Exception as e:
+        print("[patch] error:", e)
+
+
+patch_ytdlp_vk_subs()
+
 app = Flask(__name__)
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
