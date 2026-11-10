@@ -489,6 +489,56 @@ def subtitles():
             'error': f'{type(e).__name__}: {e}'
         }), 500
 
+@app.route('/subtitle')
+def subtitle_proxy():
+    target = request.args.get('url', '').strip()
+    if not target:
+        return Response('Falta ?url=', status=400)
+
+    try:
+        r = requests.get(
+            target,
+            headers={
+                'User-Agent': UA,
+                'Accept': '*/*',
+                'Referer': 'https://vk.com/',
+                'Origin': 'https://vk.com',
+            },
+            timeout=30,
+            allow_redirects=True
+        )
+
+        if not r.ok:
+            return Response(
+                f'Error origen: {r.status_code}',
+                status=502
+            )
+
+        body = r.content
+
+        if body.lstrip().startswith(b'WEBVTT'):
+            content_type = 'text/vtt; charset=utf-8'
+        else:
+            content_type = 'application/x-subrip; charset=utf-8'
+
+        return Response(
+            body,
+            status=200,
+            headers={
+                'Content-Type': content_type,
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                'Access-Control-Allow-Headers': 'Range, Content-Type, Accept, Origin, Referer',
+                'Cache-Control': 'public, max-age=3600',
+            }
+        )
+
+    except Exception as e:
+        return Response(
+            f'Error: {type(e).__name__}: {e}',
+            status=502
+        )
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
