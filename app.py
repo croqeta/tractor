@@ -403,7 +403,38 @@ def health():
 
 # ---------- PRUEBA TEMPORAL: anime-dl-core para VK ----------
 # ---------- PRUEBA TEMPORAL: anime-dl-core para VK ----------
+@app.route('/test-subs')
+def test_subs():
+    url = request.args.get('url', '').strip()
+    if not url:
+        return Response('Falta ?url=', status=400, mimetype='text/plain')
 
+    try:
+        r = subprocess.run(
+            [
+                'yt-dlp',
+                '--no-warnings',
+                '--no-playlist',
+                '--list-subs',
+                url
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        return Response(
+            f"RC: {r.returncode}\n\n"
+            f"STDOUT:\n{r.stdout}\n\n"
+            f"STDERR:\n{r.stderr}",
+            mimetype='text/plain; charset=utf-8'
+        )
+    except Exception as e:
+        return Response(
+            f"Error: {type(e).__name__}: {e}",
+            status=500,
+            mimetype='text/plain; charset=utf-8'
+        )
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
