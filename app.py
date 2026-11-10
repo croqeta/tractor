@@ -425,19 +425,20 @@ def health():
 
 # ---------- PRUEBA TEMPORAL: anime-dl-core para VK ----------
 # ---------- PRUEBA TEMPORAL: anime-dl-core para VK ----------
-@app.route('/test-subs')
-def test_subs():
+@app.route('/subtitles')
+def subtitles():
     url = request.args.get('url', '').strip()
     if not url:
-        return Response('Falta ?url=', status=400, mimetype='text/plain')
+        return jsonify({'subtitles': []}), 400
 
     try:
         r = subprocess.run(
             [
                 'yt-dlp',
+                '-J',
                 '--no-warnings',
                 '--no-playlist',
-                '--list-subs',
+                '--skip-download',
                 url
             ],
             capture_output=True,
@@ -445,18 +446,48 @@ def test_subs():
             timeout=60
         )
 
-        return Response(
-            f"RC: {r.returncode}\n\n"
-            f"STDOUT:\n{r.stdout}\n\n"
-            f"STDERR:\n{r.stderr}",
-            mimetype='text/plain; charset=utf-8'
-        )
+        if r.returncode != 0:
+            return jsonify({
+                'subtitles': [],
+                'error': r.stderr[-1000:]
+            }), 502
+
+        data = jsonlib.loads(r.stdout)
+        raw = data.get('subtitles') or {}
+
+        names = {'es': 'Español', 'en': 'Inglés'}
+        out = []
+
+        for lang, entries in raw.items():
+            for e in entries:
+                u = e.get('url')
+                if not u:
+                    continue
+
+                ext = (e.get('ext') or 'vtt').lower()
+
+                # Preferir SRT si ya existe ese idioma
+                existing = next((x for x in out if x['lang'] == lang), None)
+                if existing:
+                    if ext == 'srt' and not existing['url'].lower().endswith('.srt'):
+                        existing['url'] = u
+                        existing['id'] = f'{lang}-srt'
+                    continue
+
+                out.append({
+                    'id': f'{lang}-{ext}',
+                    'url': u,
+                    'lang': lang,
+                    'name': names.get(lang, lang)
+                })
+
+        return jsonify({'subtitles': out})
+
     except Exception as e:
-        return Response(
-            f"Error: {type(e).__name__}: {e}",
-            status=500,
-            mimetype='text/plain; charset=utf-8'
-        )
+        return jsonify({
+            'subtitles': [],
+            'error': f'{type(e).__name__}: {e}'
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
